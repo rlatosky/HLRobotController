@@ -39,6 +39,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <LittleFS.h>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -239,6 +240,35 @@ String getStatusHTML(void)
 }
 
 //-----------------------------------------
+// WebServerSendFile
+//
+// This is called whenever a file is requested from the web server
+// that it has not been explicitly told how to handle. This will look
+// for a file of the given name in the onboard LittleFS filesystem
+// and, if found, return it.
+//-----------------------------------------
+void WebServerSendFile() {
+  String path = server.uri(); // Get the URI of the request
+  String contentType = "text/plain"; // Default content type
+
+  if( path == "/" ) path = "index.html";
+
+  if (path.endsWith(".html")) contentType = "text/html";
+  if (path.endsWith(".png" )) contentType = "image/png";
+  if (path.endsWith(".jpg" )) contentType = "image/jpeg";
+  if (path.endsWith(".py"  )) contentType = "text/x-python";
+
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    server.send(404, "text/plain", "File not found");
+    return;
+  }
+
+  server.streamFile(file, contentType);
+  file.close();
+}
+
+//-----------------------------------------
 // escapeJsonString
 //-----------------------------------------
 String escapeJsonString(const String& input) {
@@ -406,6 +436,17 @@ void onMessage(WebsocketsClient& client, WebsocketsMessage message) {
     if( tokens[1][0] == 'S' ){
       if( idx>=0 && idx<=7 ){SetServo(idx, SERVO_SET[idx]+delta);}else{Serial.println("Bad Servo number in: " + data);}
     }
+
+  // Motor/servo set
+  }else if( cmd=="set" && tokens.size()==3){
+    int idx = atoi(&(tokens[1].c_str()[1])); // TODO: check that tokens[1].length()==1
+    float val = atof(tokens[2].c_str());
+    if( tokens[1][0] == 'M' ){
+      if( idx>=0 && idx<=3 ){SetMotor(idx, val);}else{Serial.println("Bad Motor number in: " + data);}
+    }
+    if( tokens[1][0] == 'S' ){
+      if( idx>=0 && idx<=7 ){SetServo(idx, val);}else{Serial.println("Bad Servo number in: " + data);}
+    }
   
   // Unknown or bad command
   }else{
@@ -501,7 +542,21 @@ void handleDisplay(void)
   last_time = millis();
 }
 
-
+//----------------------------------------------
+// WiFiAPCallback
+//
+// Called iff WiFi is unable to connect and has
+// to fall back to creating an AP for configuration
+//----------------------------------------------
+void WiFiAPCallback (WiFiManager *myWiFiManager) {
+  Serial.println("WiFi connection falling back to AP for configuration.");
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(0);
+  display.setCursor(0, 0); display.print("WiFi config AP:");
+  display.setCursor(0,10); display.print(APNAME);
+  display.display();
+}
 //==========================================================================================================================
 
 //-----------------------------------------
@@ -521,12 +576,21 @@ void setup() {
     display.display();
   }
 
+  // Initialize LittleFS filesystem
+  LittleFS.begin(); // TODO: check for error
+
   // Connect to WiFi
   // This will use cached credentials to try and connect. If unsuccessful,
   // it will automatically setup an AP where the credentials can be set
   // via web browser.
   WiFiManager wm;
-  bool res = wm.autoConnect(APNAME); 
+  wm.setAPCallback(WiFiAPCallback);
+  bool res = wm.autoConnect(APNAME);
+  Serial.println(F("Disconnecting and forgetting WiFi ..."));
+  
+  // Erase all config parameters from ESP8266 (for debugging)
+  // ESP.eraseConfig();
+  // ESP.restart();
 
   // If we failed to connect to WiFi, restart the device so we can try again.
   if(!res) {
@@ -603,7 +667,8 @@ void setup() {
   }
   
   // Start HTTP Server for Web Page
-  server.on("/", HTTP_GET, []() { server.send(200, "text/html", getHomePageHTML());});
+  // server.on("/", HTTP_GET, []() { server.send(200, "text/html", getHomePageHTML());});
+  server.onNotFound(WebServerSendFile); // handle all file requests such as images and downloads
   server.begin();
   
 }

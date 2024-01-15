@@ -1,0 +1,67 @@
+<html>
+    <body>
+        <h1>HL Robot Controller</h1>
+        <p>
+        n.b. The controls here work with Firefox and Safari, but not Chrome.
+        </p>
+        <p>
+        Download an example python script for controlling the device with a Logitec F310 gamecontroller
+        <A href="gamepad_example.py" target="_blank">here</A>.
+        </p>
+        <hr>
+        <h2>Status:</h2>
+        <table><tr><td>connection Status:</td><td><div id="connectionStatus">connecting...</div></td></tr></table>
+        <div id="status">Waiting for status...</div>
+        <hr>
+
+        <script>
+        var connection = new WebSocket('ws://' + location.hostname + ':81/', ['arduino']);
+        var lastPingTime = Date.now();
+
+        connection.onopen = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'connected'; startHeartbeat();};
+        connection.onclose = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'disconnected'};
+        connection.onerror = function (error) { console.log('WebSocket Error:: ', error); document.getElementById('connectionStatus').textContent = 'error'};
+        connection.onmessage = function (e) {
+            lastPingTime = Date.now(); // use as hearbeat
+            var message = JSON.parse(e.data);
+            switch (message.type) {
+            case 'status':
+                document.getElementById('status').innerHTML = message.content;
+                break;
+            // Handle other message types here
+            default:
+                console.log('Unknown message type');
+            }
+        };
+
+        function sendCommand(command) {
+            connection.send(command);
+        }
+
+        function handleEnableCheckbox(checkbox, identifier) {
+            var command = checkbox.checked ? "enable " + identifier + " 1" : "enable " + identifier + " 0";
+            connection.send(command);
+        }
+
+        function startHeartbeat() {
+            setInterval(function() {
+            if (Date.now() - lastPingTime > 4000) { // 4 seconds timeout
+                document.getElementById('connectionStatus').textContent = 'stalled';
+            }
+            }, 4000); // Check every 4 seconds
+        }
+        </script>
+
+        <!-- Embedded Motor Controls -->
+        <div id="controls"></div>
+        <script>
+            fetch('controls.html')
+                .then(response => response.text())
+                .then(data => {
+                    document.getElementById('controls').innerHTML = data;
+                });
+        </script>
+
+    </body>
+</html>
+
