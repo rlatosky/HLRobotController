@@ -37,6 +37,8 @@
 #include <EEPROM.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_PWMServoDriver.h>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -61,6 +63,10 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60*60*1000); // 0 is for adjusti
 
 unsigned long html_page_requests = 0;
 
+// Initialize the PCA9685 using the default address 0x40
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+#define PWM_FREQ  50  // in Hz
+
 // 16chan PWM channel assignments
 #define SERVO0   0 
 #define SERVO1   1 
@@ -75,7 +81,7 @@ unsigned long html_page_requests = 0;
 #define MOTOR3A 10
 #define MOTOR3B 11
 #define SERVO4  12
-#define SERVO5  14 
+#define SERVO5  13 
 #define SERVO6  14 
 #define SERVO7  15
 
@@ -88,6 +94,14 @@ float MOTOR_SET[5];
 String SERVO_NAMES[] = {"S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"};
 bool SERVO_ENABLE[8]; // C++ sets these all to false be default
 float SERVO_SET[8];
+
+
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool oledactive = false;
 
 //==========================================================================================================================
 
@@ -128,15 +142,20 @@ String getHomePageHTML(void)
           n.b. The controls here work with Firefox and Safari, but not Chrome.
           <p>
           <hr>
-          <h2>Status</h2>
+          <h2>Status:</h2>
+          <table><tr><td>connection Status:</td><td><div id="connectionStatus">connecting...</div></td></tr></table>
           <div id="status">Waiting for status...</div>
           <hr>
 
           <script>
             var connection = new WebSocket('ws://' + location.hostname + ':81/', ['arduino']);
-            connection.onopen = function () { console.log('Connected: '); };
-            connection.onerror = function (error) { console.log('WebSocket Error:: ', error); };
+            var lastPingTime = Date.now();
+
+            connection.onopen = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'connected'; startHeartbeat();};
+            connection.onclose = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'disconnected'};
+            connection.onerror = function (error) { console.log('WebSocket Error:: ', error); document.getElementById('connectionStatus').textContent = 'error'};
             connection.onmessage = function (e) {
+              lastPingTime = Date.now(); // use as hearbeat
               var message = JSON.parse(e.data);
               switch (message.type) {
                 case 'status':
@@ -150,7 +169,16 @@ String getHomePageHTML(void)
 
             function sendCommand(command) {
               connection.send(command);
-              }
+            }
+
+            function startHeartbeat() {
+              setInterval(function() {
+                if (Date.now() - lastPingTime > 4000) { // 4 seconds timeout
+                  document.getElementById('connectionStatus').textContent = 'stalled';
+                }
+              }, 4000); // Check every 4 seconds
+            }
+            
           </script>
     )";
 
@@ -162,7 +190,7 @@ String getHomePageHTML(void)
   html += "</table>\n";
   html += "<table>\n";
   html += "  <tr><th style='background-color: black; color: white; border: 1px solid black;'>Servos</th</tr>\n";
-  for( auto name: SERVO_NAMES ) html += "  <tr><td>\n" + getSingleChannelControlsHTML( name ) + "\n  </td></tr>\n";
+  for( auto name: SERVO_NAMES ) html += "  <tr><td>\n" + getSingleChannelControlsHTML( name, 0.01 ) + "\n  </td></tr>\n";
   html += "</table>\n";
 
   // Close off HTML
@@ -233,7 +261,7 @@ String escapeJsonString(const String& input) {
 //-----------------------------------------
 // SetMotor
 //-----------------------------------------
-void SetMotor(int idx, float val)
+void SetMotor(int idx, float speed)
 {
   if( idx<0 || idx>3 ){
     Serial.print("Bad Motor number: ");
@@ -241,14 +269,92 @@ void SetMotor(int idx, float val)
     return;
   }
 
-  if( val< -1.0 ) val = -1.0;
-  if( val> +1.0 ) val = +1.0;
+  if( speed< -1.0 ) speed = -1.0;
+  if( speed> +1.0 ) speed = +1.0;
   
-  MOTOR_SET[idx] = val;
+  MOTOR_SET[idx] = speed;
+  int motorIN1, motorIN2;
+  switch(idx){
+    case 0:
+      motorIN1 = MOTOR0A;
+      motorIN2 = MOTOR0B;
+      break;
+    case 1:
+      motorIN1 = MOTOR1A;
+      motorIN2 = MOTOR1B;
+      break;
+    case 2:
+      motorIN1 = MOTOR2A;
+      motorIN2 = MOTOR2B;
+      break;
+    case 3:
+      motorIN1 = MOTOR3A;
+      motorIN2 = MOTOR3B;
+      break;
+  }
 
-  
+  int pwmValue = abs(speed) * 4095; // Map speed to PWM value (0-4095)
+  if( ! MOTOR_ENABLE[idx] ) pwmValue = 0.0;
+
+  if (speed > 0) {
+    // Forward
+    pwm.setPWM(motorIN1, 0, pwmValue);
+    pwm.setPWM(motorIN2, 0, 0); // Or use 4095 for braking
+  } else if (speed < 0) {
+    // Backward
+    pwm.setPWM(motorIN1, 0, 0); // Or use 4095 for braking
+    pwm.setPWM(motorIN2, 0, pwmValue);
+  } else {
+    // Stop or Brake
+    pwm.setPWM(motorIN1, 0, 0);
+    pwm.setPWM(motorIN2, 0, 0); // Or set both to 4095 for hard braking
+  }
 }
 
+//-----------------------------------------
+// SetServo
+//-----------------------------------------
+void SetServo(int idx, float pos)
+{
+  if( idx<0 || idx>7 ){
+    Serial.print("Bad Servo number: ");
+    Serial.println(idx);
+    return;
+  }
+
+  if( pos< 0.0 ) pos = 0.0;
+  if( pos> 1.0 ) pos = 1.0;
+
+  SERVO_SET[idx] = pos;
+  int chan;
+  switch(idx){
+    case 0: chan =SERVO0; break;
+    case 1: chan =SERVO1; break;
+    case 2: chan =SERVO2; break;
+    case 3: chan =SERVO3; break;
+    case 4: chan =SERVO4; break;
+    case 5: chan =SERVO5; break;
+    case 6: chan =SERVO6; break;
+    case 7: chan =SERVO7; break;
+  }
+
+  // Standard servos have a typical pulse width range of 1ms-2ms
+  // corresponding to the two limits of motion. To try and accomodate
+  // servors with a wider range, we map pos to a pulse width value
+  // ranging from 0.75ms (pos=0) to 1.25ms (pos=1).
+  const float ticks_per_ms = PWM_FREQ*4095.0/1000.0;
+  const float pulse_min_ms = 0.75;
+  const float pulse_max_ms = 2.25;
+  const float pulse_width_ms = pulse_min_ms + pos * (pulse_max_ms - pulse_min_ms);
+
+  int pwmValue = ticks_per_ms*pulse_width_ms; // convert to pulse off time in PWM ticks
+  if( pwmValue>4095 ) pwmValue = 4095;
+  if( SERVO_ENABLE[idx] ) {
+    pwm.setPWM(chan, 0, pwmValue);
+  }else{
+    pwm.setPWM(chan, 1, 0); // setting ON to value larger than OFF effectively disables servo
+  }
+}
 //==========================================================================================================================
 
 //-----------------------------------------
@@ -284,10 +390,10 @@ void onMessage(WebsocketsClient& client, WebsocketsMessage message) {
     int idx = atoi(&(tokens[1].c_str()[1])); // TODO: check that tokens[1].length()==1
     bool enable = atoi(tokens[2].c_str());
     if( tokens[1][0] == 'M' ){
-      if( idx>=0 && idx<=3 ){MOTOR_ENABLE[idx] = enable;}else{Serial.println("Bad Motor number in: " + data);}
+      if( idx>=0 && idx<=3 ){MOTOR_ENABLE[idx]=enable; SetMotor(idx, MOTOR_SET[idx]);}else{Serial.println("Bad Motor number in: " + data);}
     }
     if( tokens[1][0] == 'S' ){
-      if( idx>=0 && idx<=7 ){SERVO_ENABLE[idx] = enable;}else{Serial.println("Bad Servo number in: " + data);}
+      if( idx>=0 && idx<=7 ){SERVO_ENABLE[idx]=enable; SetServo(idx, SERVO_SET[idx]);}else{Serial.println("Bad Servo number in: " + data);}
     }
 
   // Motor/servo increment/decrement
@@ -298,7 +404,7 @@ void onMessage(WebsocketsClient& client, WebsocketsMessage message) {
       if( idx>=0 && idx<=3 ){SetMotor(idx, MOTOR_SET[idx]+delta);}else{Serial.println("Bad Motor number in: " + data);}
     }
     if( tokens[1][0] == 'S' ){
-      if( idx>=0 && idx<=7 ){SERVO_SET[idx] += delta;}else{Serial.println("Bad Servo number in: " + data);}
+      if( idx>=0 && idx<=7 ){SetServo(idx, SERVO_SET[idx]+delta);}else{Serial.println("Bad Servo number in: " + data);}
     }
   
   // Unknown or bad command
@@ -358,6 +464,42 @@ void handleWebSockets() {
   }
 }
 
+//----------------------------------------------
+// handleDisplay
+//
+// Update display
+//----------------------------------------------
+void handleDisplay(void)
+{
+  if (! oledactive ) return;
+
+  static auto last_time = millis();
+  if( (millis() - last_time) < 1000 ) return;
+
+  display.clearDisplay();
+ 
+  display.setTextColor(WHITE);
+  display.setTextSize(0);
+
+  int y = 0;
+  display.setCursor(0,y);
+  String ipstr = String("IP: ") + WiFi.localIP().toString();
+  display.print(ipstr);
+
+  y += 10;
+  display.setCursor(0,y);
+  String macstr = String("MAC:") + WiFi.macAddress();
+  display.print(macstr);
+
+  // TODO: Connect input voltage to NodeMCU analog input pin with 1:10 voltage divider.
+  // y += 10;
+  // display.setCursor(0,y);
+  // String vstr = String("   Battery: " + String(vals.vA0, 2) + String("V"));
+  // display.print(vstr);
+
+  display.display();
+  last_time = millis();
+}
 
 
 //==========================================================================================================================
@@ -369,6 +511,15 @@ void setup() {
 // Start serial monitor
   Serial.begin(74880); // the ESP8266 boot loader uses this. We can set it to something else here, but the first few messages will be garbled.
   Serial.println();
+
+  // Initialize OLED 128x64 pixel display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println(F("SSD1306 allocation failed"));
+  }else{
+    Serial.println(F("SSD1306 found"));
+    oledactive = true;
+    display.display();
+  }
 
   // Connect to WiFi
   // This will use cached credentials to try and connect. If unsuccessful,
@@ -441,6 +592,15 @@ void setup() {
   });
   ArduinoOTA.begin();
   //...............................................................................
+
+  // Start PCS9685 PWM driver and set base frequency
+  if( pwm.begin() ){
+    Serial.println("PCA9685 PWM module initialized");
+    // pwm.setPWMFreq(1000); // Set frequency to 1 kHz
+    pwm.setPWMFreq(50); // Set frequency to 50 kHz (typical servo frequency)
+  }else{
+    Serial.println("FAILED: PCA9685 PWM module initialization");
+  }
   
   // Start HTTP Server for Web Page
   server.on("/", HTTP_GET, []() { server.send(200, "text/html", getHomePageHTML());});
@@ -457,5 +617,7 @@ void loop() {
 
   server.handleClient(); // Handle HTTP requests
   handleWebSockets();    // Handle WebSocket connections
+
+  handleDisplay();       // Handle updating display
 }
 
