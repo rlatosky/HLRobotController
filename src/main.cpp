@@ -1,10 +1,10 @@
 //=======================================================================
-// HLRobotController Firmware v0.0
+// HLRobotController Firmware v1.0
 //
 // This sketch is the firmware on the HL RobotController.
 // The device consists of a NodeMCU ESP8266 WiFi enabled microcontroller,
-// 2 L298N dual channel DC motor controllers, one PCA9688? 16 channel PWM,
-// and a couple of DC-DC converters.
+// two L298N dual channel DC motor controllers, one PCA9865 16 channel PWM,
+// and a couple of DC-DC buck converters.
 //
 // This provides a minimal web server for controlling the motors via
 // web browser. When initially powered, it will try and connect to
@@ -16,12 +16,16 @@
 // Once connected to the local WiFi network, the web server can be used
 // for controlling the motors via web browser.
 //
+// The device can also be controlled from python using the WebSockets
+// interface. An example python script is included. (See comments in
+// the platformio.ini file for details).
+//
 // This firmware includes an OTA (Over-The_Air) updater (port 8266) that
 // can be used to update the firmware over WiFi.
 //
 // This code is maintained at:
 //
-//  https://github.com/????
+//  https://github.com/faustus123/HLRobotController
 //=======================================================================
 
 
@@ -106,102 +110,6 @@ bool oledactive = false;
 
 //==========================================================================================================================
 
-//-----------------------------------------
-// getSingleChannelControlsHTML
-//-----------------------------------------
-String getSingleChannelControlsHTML(String name, float scale=1.0)
-{
-  String scale1(scale, 2);
-  String scale10(scale*10.0, 2);
-  String id = name + "_enable";
-  String html = "";
-  html += "    <input type=\"checkbox\" id=\"" + id + "\" />\n";
-  html += "    <label for=\"" + id + "\">" + name + " enable</label>\n";
-  html += "    <button onClick=\"sendCommand('incr " + name + " -" + scale10 +"')\">-" + scale10 + "</button>\n";
-  html += "    <button onClick=\"sendCommand('incr " + name + " -" + scale   +"')\">-" + scale   + "</button>\n";
-  html += "    <button onClick=\"sendCommand('incr " + name + "  " + scale   +"')\">+" + scale   + "</button>\n";
-  html += "    <button onClick=\"sendCommand('incr " + name + "  " + scale10 +"')\">+" + scale10 + "</button>\n";
-  html += "    <script>\n";
-  html += "       document.getElementById('" + id + "').addEventListener('change', function() {\n";
-  html += "         if (this.checked) { connection.send(\"enable " + name + " 1\"); }else{ connection.send(\"enable " + name + " 0\");}\n";
-  html += "       });\n";
-  html += "    </script>\n";
-
-  return html;
-}
-
-//-----------------------------------------
-// getHomePageHTML
-//-----------------------------------------
-String getHomePageHTML(void)
-{
-  String html = R"(
-      <html>
-        <body>
-          <h1>HL Robot Controller</h1>
-          <p>
-          n.b. The controls here work with Firefox and Safari, but not Chrome.
-          <p>
-          <hr>
-          <h2>Status:</h2>
-          <table><tr><td>connection Status:</td><td><div id="connectionStatus">connecting...</div></td></tr></table>
-          <div id="status">Waiting for status...</div>
-          <hr>
-
-          <script>
-            var connection = new WebSocket('ws://' + location.hostname + ':81/', ['arduino']);
-            var lastPingTime = Date.now();
-
-            connection.onopen = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'connected'; startHeartbeat();};
-            connection.onclose = function () { console.log('Connected: '); document.getElementById('connectionStatus').textContent = 'disconnected'};
-            connection.onerror = function (error) { console.log('WebSocket Error:: ', error); document.getElementById('connectionStatus').textContent = 'error'};
-            connection.onmessage = function (e) {
-              lastPingTime = Date.now(); // use as hearbeat
-              var message = JSON.parse(e.data);
-              switch (message.type) {
-                case 'status':
-                    document.getElementById('status').innerHTML = message.content;
-                    break;
-                // Handle other message types here
-                default:
-                    console.log('Unknown message type');
-              }
-            };
-
-            function sendCommand(command) {
-              connection.send(command);
-            }
-
-            function startHeartbeat() {
-              setInterval(function() {
-                if (Date.now() - lastPingTime > 4000) { // 4 seconds timeout
-                  document.getElementById('connectionStatus').textContent = 'stalled';
-                }
-              }, 4000); // Check every 4 seconds
-            }
-            
-          </script>
-    )";
-
-  // Add controls for each motor
-  html += "\n";
-  html += "<table>\n";
-  html += "  <tr><th style='background-color: red; color: white; border: 1px solid black;'>DC Motors</th</tr>\n";
-  for( auto name: MOTOR_NAMES ) html += "  <tr><td>\n" + getSingleChannelControlsHTML( name, 0.01 ) + "\n  </td></tr>\n";
-  html += "</table>\n";
-  html += "<table>\n";
-  html += "  <tr><th style='background-color: black; color: white; border: 1px solid black;'>Servos</th</tr>\n";
-  for( auto name: SERVO_NAMES ) html += "  <tr><td>\n" + getSingleChannelControlsHTML( name, 0.01 ) + "\n  </td></tr>\n";
-  html += "</table>\n";
-
-  // Close off HTML
-  html += R"(
-        </body>
-      </html>
-    )";
-  
-  return html;
-}
 
 //-----------------------------------------
 // getStatusHTML
