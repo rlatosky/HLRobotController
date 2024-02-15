@@ -1,4 +1,19 @@
 <html>
+    <head>
+        <style>
+            .red-button {
+                background-color: red;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                position: fixed; /* Fixed position */
+                bottom: 10px;    /* Positioned at the bottom */
+                right: 10px;     /* Positioned on the right */
+            }
+            </style>
+    </head>
     <body>
         <h1>HL Robot Controller</h1>
         <p>
@@ -62,6 +77,8 @@
                 });
         </script>
 
+
+        <p><button class="red-button" onclick="location.href='ERASE_AND_RESTART.html'">Forget WiFi Credentials</button></p>
     </body>
 </html>
 

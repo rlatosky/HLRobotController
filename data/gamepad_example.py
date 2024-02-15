@@ -10,7 +10,7 @@
 # them in a virtual environment like this:
 #
 # python3 -m venv venv
-# source venv.bin.activate
+# source venv/bin/activate
 # pip install --upgrade pip
 # pip install hid websocket-client
 #
@@ -74,6 +74,7 @@ def WSThread():
 							  on_message=on_message,
 							  on_error=on_error,
 							  on_close=on_close)
+	print("Websockets thread started.")
 	ws.run_forever()
 
 threading.Thread(target=WSThread).start()
@@ -120,7 +121,7 @@ def SetEnableAll(val):
 # Find Logitech device
 vendor_id = 0x0
 product_id = 0x0
-gampad = None
+gamepad = None
 state = None
 for d in hid.enumerate():
 	if d['product_string'] == 'Logitech Dual Action':
@@ -137,6 +138,10 @@ if not gamepad:
 else:
 	last_R3 = False
 	last_L3 = False
+	last_left_joy_V = -1
+	last_left_joy_H = -1
+	last_right_joy_V = -1
+	last_right_joy_H = -1
 	while True:
 		report = gamepad.read(512)
 		if report:
@@ -151,11 +156,6 @@ else:
 			if state['L3']: SetEnableAll(0)
 			if state['R3']: SetEnableAll(1)
 
-			ws.send("set M0 " + str(state['left_joy_V'  ])) if( abs(state['left_joy_V'  ]) > 0.05 )  else ws.send("set M0 0")
-			ws.send("set M1 " + str(state['left_joy_H'  ])) if( abs(state['left_joy_H'  ]) > 0.05 )  else ws.send("set M1 0")
-			ws.send("set M2 " + str(state['right_joy_V' ])) if( abs(state['right_joy_V' ]) > 0.05 )  else ws.send("set M2 0")
-			ws.send("set M3 " + str(state['right_joy_H' ])) if( abs(state['right_joy_H' ]) > 0.05 )  else ws.send("set M3 0")
-   
 			if state['dpad_up'   ]: ws.send("incr S0  0.01")
 			if state['dpad_down' ]: ws.send("incr S0 -0.01")
 			if state['dpad_left' ]: ws.send("incr S1  0.01")
@@ -166,6 +166,33 @@ else:
 			if state['button_X'  ]: ws.send("incr S5  0.01")
 			if state['button_B'  ]: ws.send("incr S5 -0.01")
 
+
+			# For the joysticks we implement a deadband around zero
+			# as well as the last value sent. This significantly 
+			# reduces the number of messages sent.
+			left_joy_V = state['left_joy_V']
+			left_joy_H = state['left_joy_H']
+			right_joy_V = state['right_joy_V']
+			right_joy_H = state['right_joy_H']
+   			
+			if( abs(left_joy_V ) < 0.05 ) :  left_joy_V  = 0
+			if( abs(left_joy_H ) < 0.05 ) :  left_joy_H  = 0
+			if( abs(right_joy_V) < 0.05 ) :  right_joy_V = 0
+			if( abs(right_joy_H) < 0.05 ) :  right_joy_H = 0
+
+			if( abs( left_joy_V - last_left_joy_V ) > 0.05 ):
+				last_left_joy_V = left_joy_V
+				ws.send("set M0 " + str(last_left_joy_V))
+			if( abs( left_joy_H - last_left_joy_H ) > 0.05 ):
+				last_left_joy_H = left_joy_H
+				ws.send("set M1 " + str(last_left_joy_H))
+			if( abs( right_joy_V - last_right_joy_V ) > 0.05 ):
+				last_right_joy_V = right_joy_V
+				ws.send("set M2 " + str(last_right_joy_V))
+			if( abs( right_joy_H - last_right_joy_H ) > 0.05 ):
+				last_right_joy_H = right_joy_H
+				ws.send("set M3 " + str(last_right_joy_H))
+   
 			if message : print(message)
 			message = None
 

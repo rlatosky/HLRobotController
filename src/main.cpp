@@ -32,13 +32,16 @@
 #include <Arduino.h>
 #include <WiFiManager.h>
 #include <NTPClient.h>
-#include <ESP8266WiFi.h>
+// #include <ESP8266WiFi.h>
+// #include <ESP8266WebServer.h>
+#include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#include <WebServer.h>
 #include <ArduinoWebsockets.h>
 #include <EEPROM.h>
+#include <nvs_flash.h>
+#include <nvs.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -55,7 +58,9 @@
 const char *APNAME = "HLMotorController";
 
 // Setup our webserver which just serves up the static pages (with embedded javascript)
-ESP8266WebServer server(80);
+// ESP8266WebServer server(80);
+// ESP8266WebServer *server = nullptr;
+WebServer *server = nullptr;
 
 // Setup our websockets server for persistent connections
 using namespace websockets;
@@ -70,6 +75,7 @@ unsigned long html_page_requests = 0;
 
 // Initialize the PCA9685 using the default address 0x40
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+bool PWM_FOUND = false;
 #define PWM_FREQ  50  // in Hz
 
 // 16chan PWM channel assignments
@@ -103,7 +109,8 @@ float SERVO_SET[8];
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+// #define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 bool oledactive = false;
@@ -156,7 +163,7 @@ String getStatusHTML(void)
 // and, if found, return it.
 //-----------------------------------------
 void WebServerSendFile() {
-  String path = server.uri(); // Get the URI of the request
+  String path = server->uri(); // Get the URI of the request
   String contentType = "text/plain"; // Default content type
 
   if( path == "/" ) path = "index.html";
@@ -168,11 +175,11 @@ void WebServerSendFile() {
 
   File file = LittleFS.open(path, "r");
   if (!file) {
-    server.send(404, "text/plain", "File not found");
+    server->send(404, "text/plain", "File not found");
     return;
   }
 
-  server.streamFile(file, contentType);
+  server->streamFile(file, contentType);
   file.close();
 }
 
@@ -191,6 +198,25 @@ String escapeJsonString(const String& input) {
         }
     }
     return output;
+}
+
+//-----------------------------------------
+// ERASE_AND_RESTART
+//
+// This will erase the WiFi connection info (and all
+// other configuration info) from the ESP and then
+// restart it. It is useful for debugging.
+//
+// This gets called when the ERASE_AND_RESTART.html 
+// URL is requested from the webserver. 
+//-----------------------------------------
+void ERASE_AND_RESTART(){
+  // Erase all config parameters from ESP8266
+  // ESP.eraseConfig();
+  // ESP.restart();
+  nvs_flash_init();
+  nvs_flash_erase();
+  nvs_flash_init();
 }
 
 
@@ -233,6 +259,8 @@ void SetMotor(int idx, float speed)
 
   int pwmValue = abs(speed) * 4095; // Map speed to PWM value (0-4095)
   if( ! MOTOR_ENABLE[idx] ) pwmValue = 0.0;
+
+  if( ! PWM_FOUND ) return; 
 
   if (speed > 0) {
     // Forward
@@ -287,6 +315,9 @@ void SetServo(int idx, float pos)
 
   int pwmValue = ticks_per_ms*pulse_width_ms; // convert to pulse off time in PWM ticks
   if( pwmValue>4095 ) pwmValue = 4095;
+
+  if( ! PWM_FOUND ) return; 
+
   if( SERVO_ENABLE[idx] ) {
     pwm.setPWM(chan, 0, pwmValue);
   }else{
@@ -451,6 +482,28 @@ void handleDisplay(void)
 }
 
 //----------------------------------------------
+// CreateWebServer
+//
+// Called to create the webserver. If all goes well and we
+// connect to WiFi, then this will be called with the 
+// standard port=80. If the WiFiManager falls back to creating
+// its own AP, then it will listen on port 80 to serve up
+// the configuration page and this will be called with port
+// = 8080. This will allow the device to still function in
+// AP mode.
+//----------------------------------------------
+void CreateWebServer (int port=80) {
+  if( server ) delete server;
+  // server = new ESP8266WebServer(port);
+  server = new WebServer(port);
+
+  auto reload_home = "<!DOCTYPE html><html><head><meta http-equiv=\"refresh\" content=\"0;url=/\" /></head><body></body></html>";
+  server->on("/ERASE_AND_RESTART.html", HTTP_GET, [reload_home]() { server->send(200, "text/html", reload_home); ERASE_AND_RESTART();});
+  server->onNotFound(WebServerSendFile); // handle all file requests such as images and downloads
+  server->begin();
+}
+
+//----------------------------------------------
 // WiFiAPCallback
 //
 // Called iff WiFi is unable to connect and has
@@ -458,13 +511,42 @@ void handleDisplay(void)
 //----------------------------------------------
 void WiFiAPCallback (WiFiManager *myWiFiManager) {
   Serial.println("WiFi connection falling back to AP for configuration.");
+  CreateWebServer(8080);
+  // Start websocket server which will handle persistent connections from javascript
+  webSocketServer.listen(81);
+  Serial.print("Websockets Server Status: ");
+  Serial.println(webSocketServer.available());
+
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.setTextSize(0);
   display.setCursor(0, 0); display.print("WiFi config AP:");
   display.setCursor(0,10); display.print(APNAME);
+  display.setCursor(0,25); display.print("Controls Web server:");
+  display.setCursor(0,35); display.print("192.168.4.1:8080");
   display.display();
 }
+
+//----------------------------------------------
+// WiFiAPLoopCallback
+//
+// Called iff WiFi is unable to connect and has
+// fallen back to creating an AP for configuration.
+// This is called from within the inner loop of the
+// configPortal to give us a chance to service our
+// own web server. This allows the robot to be controlled
+// while using the AP configuration portal.
+//
+// NOTE: THE WiFiManager CODE WAS MODIFIED TO ALLOW
+// THIS! IT IS NOT PART OF THE OFFICIAL WiFiManager
+// SOURCE!
+//----------------------------------------------
+void WiFiAPLoopCallback (WiFiManager *myWiFiManager) {
+  server->handleClient(); // Handle HTTP requests
+  handleWebSockets();    // Handle WebSocket connections
+  // handleDisplay();       // Handle updating display
+}
+
 //==========================================================================================================================
 
 //-----------------------------------------
@@ -472,7 +554,8 @@ void WiFiAPCallback (WiFiManager *myWiFiManager) {
 //-----------------------------------------
 void setup() {
 // Start serial monitor
-  Serial.begin(74880); // the ESP8266 boot loader uses this. We can set it to something else here, but the first few messages will be garbled.
+  // Serial.begin(74880); // the ESP8266 boot loader uses this. We can set it to something else here, but the first few messages will be garbled.
+  Serial.begin(115200); // the ESP32 boot loader uses this. We can set it to something else here, but the first few messages will be garbled.
   Serial.println();
 
   // Initialize OLED 128x64 pixel display
@@ -487,34 +570,42 @@ void setup() {
   // Initialize LittleFS filesystem
   LittleFS.begin(); // TODO: check for error
 
+  // Start PCS9685 PWM driver and set base frequency
+  if( pwm.begin() ){
+    Serial.println("PCA9685 PWM module initialized");
+    // pwm.setPWMFreq(1000); // Set frequency to 1 kHz
+    pwm.setPWMFreq(50); // Set frequency to 50 kHz (typical servo frequency)
+    PWM_FOUND = true;
+  }else{
+    Serial.println("FAILED: PCA9685 PWM module initialization");
+  }
+
   // Connect to WiFi
   // This will use cached credentials to try and connect. If unsuccessful,
   // it will automatically setup an AP where the credentials can be set
   // via web browser.
   WiFiManager wm;
   wm.setAPCallback(WiFiAPCallback);
+  wm.setAPLoopCallback(WiFiAPLoopCallback);
   bool res = wm.autoConnect(APNAME);
-  Serial.println(F("Disconnecting and forgetting WiFi ..."));
+  // Serial.println(F("Disconnecting and forgetting WiFi ..."));
   
-  // Erase all config parameters from ESP8266 (for debugging)
-  // ESP.eraseConfig();
-  // ESP.restart();
 
   // If we failed to connect to WiFi, restart the device so we can try again.
   if(!res) {
     Serial.println("Failed to connect");
     ESP.restart();
+  }else{
+    Serial.println(" connected");
+    // Connect to ntp Time Server
+    Serial.printf("Connecting to ntp server to get current time ...\n");
+    timeClient.begin();
+    timeClient.update(); // n.b. this does not block and is not required to succeed
   }
 
   // If we get here, we're connected to WiFi
-  Serial.println(" connected");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());  // Print the local IP address
-
-  // Connect to ntp Time Server
-  Serial.printf("Connecting to ntp server to get current time ...\n");
-  timeClient.begin();
-  timeClient.update(); // n.b. this does not block and is not required to succeed
 
   // Start websocket server which will handle persistent connections from javascript
   webSocketServer.listen(81);
@@ -564,20 +655,14 @@ void setup() {
   });
   ArduinoOTA.begin();
   //...............................................................................
-
-  // Start PCS9685 PWM driver and set base frequency
-  if( pwm.begin() ){
-    Serial.println("PCA9685 PWM module initialized");
-    // pwm.setPWMFreq(1000); // Set frequency to 1 kHz
-    pwm.setPWMFreq(50); // Set frequency to 50 kHz (typical servo frequency)
-  }else{
-    Serial.println("FAILED: PCA9685 PWM module initialization");
-  }
   
   // Start HTTP Server for Web Page
+  CreateWebServer();
   // server.on("/", HTTP_GET, []() { server.send(200, "text/html", getHomePageHTML());});
-  server.onNotFound(WebServerSendFile); // handle all file requests such as images and downloads
-  server.begin();
+  // auto reload_home = "<!DOCTYPE html><html><head><meta http-equiv=\"refresh\" content=\"0;url=/\" /></head><body></body></html>";
+  // server.on("/ERASE_AND_RESTART.html", HTTP_GET, [reload_home]() { server.send(200, "text/html", reload_home); ERASE_AND_RESTART();});
+  // server.onNotFound(WebServerSendFile); // handle all file requests such as images and downloads
+  // server.begin();
   
 }
 
@@ -588,7 +673,7 @@ void loop() {
   ArduinoOTA.handle();   // allows firmware upgrade over WiFi
   timeClient.update();   // keeps system clock updated
 
-  server.handleClient(); // Handle HTTP requests
+  server->handleClient(); // Handle HTTP requests
   handleWebSockets();    // Handle WebSocket connections
 
   handleDisplay();       // Handle updating display
